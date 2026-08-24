@@ -1,0 +1,12 @@
+#include <Arduino.h>
+#include <AppConfig.cnx>
+
+scope VentController {
+    void setup() {
+        Serial.begin(AppConfig.SERIAL_BAUD);
+        Serial.println("vent-controller starting");
+    }
+
+    void loop() {
+    }
+}
