@@ -55,7 +55,7 @@ src/
 │   ├── VentController.cnx        # orchestrator, owns mode and setpoints
 │   └── VentLogic.cnx             # cool/heat cycle handlers + pure predicates
 ├── Data/
-│   ├── Uptime.cnx                # monotonic 64-bit millisecond time base
+│   ├── Elapsed.cnx               # pure wrap-safe millisecond subtraction
 │   ├── Stopwatch.cnx             # ElapsedMilliseconds — resettable elapsed counters
 │   ├── RoomSensor.cnx            # Adafruit_BME280 over SPI, validity gate
 │   └── types/EHvacMode.cnx       # HVAC_COOL, HVAC_HEAT
@@ -77,8 +77,6 @@ where `mode` is a scope member and resolves bare.
 
 ```c-next
 void loop() {
-    u32 now <- millis();
-    Uptime.update(now);
     Buttons.update();
     RoomSensor.update();
     if (mode = HVAC_COOL) { VentLogic.handleCoolCycle(); }
@@ -87,105 +85,72 @@ void loop() {
 }
 ```
 
-`Uptime.update()` takes the reading as a parameter rather than calling `millis()`
-itself, and the reading is saved to a variable rather than passed inline. That
-one deviation from the no-argument pattern is what makes the epoch arithmetic —
-the trickiest code in the project — testable on the host by feeding it a
-synthetic sequence. Every other scope reads its own hardware and delegates the
-decision to a pure inner function.
+Every scope reads its own hardware and delegates the decision to a pure inner
+function, so the loop names what happens without describing how.
 
 ## Time base
 
-The Teensy's `elapsedMillis` is the model — a counter read as "how long since
-this last happened" and reset by assigning zero:
+The Teensy's `elapsedMillis` is the model, and this mirrors it as closely as
+C-Next allows:
 
 ```cpp
 elapsedMillis sinceRead;
 if (sinceRead > 1000) { sinceRead = 0; readSensor(); }
 ```
 
-Its implementation is `millis() - base`, which stays correct across the 49.7-day
-`millis()` rollover only because C's unsigned subtraction wraps. C-Next defaults
-to clamp arithmetic, so at the rollover that subtraction saturates to zero and
-every timer in the firmware stalls for 49.7 days. Declaring `wrap u32` restores
-the arithmetic but puts the rollover somewhere nothing can observe or test.
+It stores one `unsigned long` — the `millis()` value at the last reset — and
+reads back `millis() - base`. Nothing accumulates, so a missed update cannot
+corrupt it and there is no global clock to keep.
 
-So the ergonomics are kept and the foundation is replaced. `Uptime` accumulates
-elapsed steps into a monotonic 64-bit millisecond count that is exact across the
-hardware wrap. `ElapsedMilliseconds` then provides `elapsedMillis` semantics on
-top of a clock that never goes backward, where the subtraction cannot underflow.
-
-### Uptime
-
-`withinEpoch` resets every 10 days and `epochCount` counts complete 10-day
-periods of uptime.
+The one thing that does not carry over is the arithmetic. `millis() - base` is
+correct across the 49.7-day rollover only because C's unsigned subtraction
+wraps; C-Next defaults to clamp, which saturates that subtraction to zero and
+stalls every timer for 49.7 days. `wrap u32` would restore it while hiding the
+rollover where nothing can observe or test it. So the wrap becomes one explicit
+branch, and everything else is `elapsedMillis` unchanged.
 
 ```c-next
-scope Uptime {
-    const u32 EPOCH_MILLISECONDS <- 864000000;   // 10 days
-
-    u32 lastReading <- 0;    // previous millis() reading
-    u32 withinEpoch <- 0;    // milliseconds elapsed inside the current epoch
-    u32 epochCount <- 0;     // completed 10-day epochs
-
-    void update(u32 now) {
-        u32 delta <- 0;
-        if (now >= lastReading) {
-            delta <- now - lastReading;
-        } else {
-            // millis() wrapped: the step from lastReading up through the u32
-            // ceiling, then from zero up to now.
-            delta <- (4294967295 - lastReading) + now + 1;
-        }
-        lastReading <- now;
-
-        withinEpoch <- withinEpoch + delta;
-        while (withinEpoch >= EPOCH_MILLISECONDS) {
-            withinEpoch <- withinEpoch - EPOCH_MILLISECONDS;
-            epochCount +<- 1;
-        }
-    }
-
-    u64 milliseconds() {
-        u64 total <- epochCount;
-        total <- total * EPOCH_MILLISECONDS;
-        total <- total + withinEpoch;
-        return total;
+// Elapsed.cnx — pure, no Arduino.h, host-testable
+scope Elapsed {
+    u32 between(u32 base, u32 now) {
+        if (now >= base) { return now - base; }
+        // millis() wrapped since base was taken: the step from base up
+        // through the u32 ceiling, then from zero up to now.
+        return (4294967295 - base) + now + 1;
     }
 }
 ```
 
-The wrap expression cannot overflow: it runs only when `now < lastReading`, so
-`(4294967295 - lastReading) + now + 1` is at most `4294967295` exactly.
-
-The `while` handles a `delta` spanning more than one epoch, which a stalled loop
-could produce. `update()` must be called at least once per `millis()` period for
-the wrap to be seen at all; the main loop satisfies that by four orders of
-magnitude.
-
-### ElapsedMilliseconds
-
 ```c-next
+// Stopwatch.cnx
 struct ElapsedMilliseconds {
-    u64 base;
+    u32 base;
 }
 
 scope Stopwatch {
-    u64 elapsed(const ElapsedMilliseconds counter) {
-        u64 now <- Uptime.milliseconds();
-        return now - counter.base;
+    u32 elapsed(const ElapsedMilliseconds counter) {
+        u32 now <- millis();
+        return Elapsed.between(counter.base, now);
     }
 
     void reset(ElapsedMilliseconds counter) {
-        counter.base <- Uptime.milliseconds();
+        counter.base <- millis();
     }
 }
 ```
 
+The wrap expression cannot overflow. It runs only when `now < base`, so
+`(4294967295 - base) + now + 1` is at most `4294967295` exactly, and clamp never
+engages anywhere in the project.
+
 Structs are data containers in C-Next, so the operations live in a scope beside
-the type rather than on it. A parameter that is written transpiles to a mutable
-pointer and a read-only struct parameter auto-consts (ADR-006), so `reset()`
-updates the caller's counter with no pointer syntax.
+the type rather than on it. A written parameter transpiles to a mutable pointer
+and a read-only struct parameter auto-consts (ADR-006), so `reset()` updates the
+caller's counter with no pointer syntax.
+
+`Elapsed.between()` is split into its own file because it holds the only
+non-obvious arithmetic in the project and must compile without `Arduino.h` to be
+tested on the host. `Stopwatch` is the two-line hardware wrapper over it.
 
 Usage is the `elapsedMillis` pattern, with the comparison extracted to satisfy
 MISRA 13.5:
@@ -194,7 +159,7 @@ MISRA 13.5:
 ElapsedMilliseconds readTimer;
 
 void update() {
-    u64 sinceRead <- Stopwatch.elapsed(readTimer);
+    u32 sinceRead <- Stopwatch.elapsed(readTimer);
     if (sinceRead < READ_INTERVAL_MILLISECONDS) { return; }
     Stopwatch.reset(readTimer);
     // ... take a reading
@@ -203,10 +168,11 @@ void update() {
 
 Five behaviours use one: the 1 s sensor read, the 25 ms debounce, the 600 ms
 hold delay and 150 ms repeat, the 250 ms redraw, and the fault duration shown on
-the display. Each would otherwise hand-roll the same comparison.
+the display.
 
-Because the clock only ever increases, C-Next's default clamp arithmetic is
-correct throughout and no `wrap` declaration appears anywhere in the project.
+This inherits `elapsedMillis`'s own limitation — an interval longer than 49.7
+days is indistinguishable from a short one. Every interval here is at most one
+second.
 
 ## Sensor
 
@@ -324,7 +290,6 @@ room look identical from outside the box.
 | Hold repeat | 600 ms delay, 150 ms interval |
 | Display redraw | 250 ms |
 | Watchdog | 2 s |
-| Uptime epoch | 10 days |
 
 There is no EEPROM use. Setpoints and mode live in RAM and return to these
 defaults on power loss.
@@ -357,7 +322,7 @@ platform = native
 test_framework = unity
 test_build_src = yes
 build_flags = -I src -I include
-; build_src_filter is filled in with the generated Uptime/VentLogic/ButtonLogic
+; build_src_filter is filled in with the generated Elapsed/VentLogic/ButtonLogic
 ; files once they exist; listing them explicitly keeps Arduino code out.
 ```
 
@@ -373,7 +338,7 @@ build_flags = -I src -I include
 }
 ```
 
-`[env:native]` compiles only the generated files for `Uptime`, `VentLogic`, and
+`[env:native]` compiles only the generated files for `Elapsed`, `VentLogic`, and
 `ButtonLogic` — none of which include `Arduino.h` — through `build_src_filter`.
 
 Flash budget is roughly 4KB core and Wire, 10KB for the Adafruit BME280 stack,
@@ -383,15 +348,11 @@ Flash budget is roughly 4KB core and Wire, 10KB for the Adafruit BME280 stack,
 
 Unity tests running on the host:
 
-**Uptime** — the epoch rolls at exactly 864,000,000; a `millis()` wrap yields
-the exact elapsed step rather than an invented one (4,294,967,295 followed by 0
-advances `milliseconds()` by 1); a single `delta` spanning more than one epoch
-rolls the count more than once; the value never decreases across a long
-synthetic sequence including several epoch rolls and several hardware wraps.
-
-**Stopwatch** — `elapsed()` reads zero immediately after `reset()`; it tracks
-the clock as `Uptime` advances; two counters reset independently; a counter
-spanning an epoch roll and a hardware wrap still reports the true interval.
+**Elapsed** — `between()` returns the plain difference when `now >= base`;
+returns zero when they are equal; returns the true interval across a wrap (base
+4,294,967,000 with now 204 gives 500); and the worst case, `base` at
+`4,294,967,295` with `now` one below it, returns `4,294,967,295` without
+saturating.
 
 **VentLogic, cooling** — a closed vent stays closed up to `setpoint +
 hysteresis` and opens above it; an open vent stays open down to `setpoint -
@@ -413,13 +374,10 @@ specified delay and interval.
    `LiquidCrystal_I2C` fork, since several incompatible ones share the name.
 3. Measure the H_Relay module's active level, then add the pull resistor for the
    pre-`setup()` window. Do this before 24VAC is connected.
-4. Verify the transpiler accepts `u64 total <- epochCount` followed by
-   `total * EPOCH_MILLISECONDS` — widening a `u32` into `u64` and multiplying
-   by a `u32` constant, which MISRA 10.4 essential-type rules could reject.
-5. Verify `"target": "avr"` is accepted by cnext 0.2.18.
-6. Confirm the Uno's 5V supply and whether it is powered independently of the
+4. Verify `"target": "avr"` is accepted by cnext 0.2.18.
+5. Confirm the Uno's 5V supply and whether it is powered independently of the
    air handler.
-7. Site the BME280 away from the register and out of the controller enclosure —
+6. Site the BME280 away from the register and out of the controller enclosure —
    self-heating and discharge air both defeat the control loop regardless of the
    firmware.
 
