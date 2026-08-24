@@ -63,6 +63,7 @@ src/
     ├── ButtonLogic.cnx           # pure debounce and gesture state machine
     ├── Buttons.cnx               # reads pins, delegates to ButtonLogic
     ├── VentDisplay.cnx           # 16x2 rendering
+    ├── SerialLog.cnx             # 1 Hz CSV status line
     └── VentRelay.cnx             # relay pin, single source of truth for vent state
 ```
 
@@ -82,11 +83,40 @@ void loop() {
     if (mode = HVAC_COOL) { VentLogic.handleCoolCycle(); }
     else                  { VentLogic.handleHeatCycle(); }
     VentDisplay.update();
+    SerialLog.update();
 }
 ```
 
 Every scope reads its own hardware and delegates the decision to a pure inner
 function, so the loop names what happens without describing how.
+
+Each `update()` also owns its own cadence. It holds an `ElapsedMilliseconds`,
+checks it first, and returns immediately when it is not yet due:
+
+```c-next
+void update() {
+    u32 sinceRead <- Stopwatch.elapsed(readTimer);
+    if (sinceRead < READ_INTERVAL_MILLISECONDS) { return; }
+    Stopwatch.reset(readTimer);
+    // ... do the work
+}
+```
+
+The alternative — holding every timer in the loop and gating each call there —
+puts each subsystem's cadence in the orchestrator and invites an `else if` chain
+between them, where two tasks due in the same pass compete and the slower one
+pushes the others behind it. Self-gating decouples them: the timers live beside
+the code they pace, and nothing can starve anything else.
+
+`Buttons.update()` is the exception that shows the rule. It runs at full loop
+rate because debouncing needs to *sample* continuously; its timer measures how
+long a level has been stable rather than gating how often the function runs.
+
+Resetting a counter to zero rather than advancing its base by the interval means
+each period is the interval plus however long the handler took — about 2 ms per
+second here, which nothing in this project notices. Teensy's `elapsedMillis`
+offers `-=` for cadences that do care; if one ever appears, it is a six-line
+`Elapsed.advanced()` beside `Elapsed.between()`.
 
 ## Time base
 
@@ -289,6 +319,7 @@ room look identical from outside the box.
 | Button debounce | 25 ms |
 | Hold repeat | 600 ms delay, 150 ms interval |
 | Display redraw | 250 ms |
+| Serial log interval | 1000 ms |
 | Watchdog | 2 s |
 
 There is no EEPROM use. Setpoints and mode live in RAM and return to these
