@@ -325,6 +325,26 @@ room look identical from outside the box.
 There is no EEPROM use. Setpoints and mode live in RAM and return to these
 defaults on power loss.
 
+### Two shapes, because they are two different things
+
+`scope AppConfig` holds only values that are fixed at build time — defaults,
+limits, step sizes, intervals. They are `public const`, they belong to no
+instance, and nothing can write to them. Measured on the Uno they cost nothing:
+every one folds into its use site and `--gc-sections` drops the definitions, so
+`avr-nm` finds no `AppConfig` symbol in the ELF at all.
+
+Runtime state — the active cooling and heating setpoints and the current mode —
+goes in an `AppData` struct instead. It is the state that buttons mutate and
+that `VentLogic` and `VentDisplay` read, so passing it explicitly makes the data
+flow visible rather than reaching it as ambient scope variables.
+
+The split is the point: a constant that can never change and a value that
+changes at runtime are different kinds of thing, and giving them the same shape
+loses that signal.
+
+`AppData` is introduced when there is state to put in it, not before. At Task 1
+there is none.
+
 Hysteresis starts at 1.0 °C and is expected to be tuned against how the room
 actually behaves.
 
