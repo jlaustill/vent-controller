@@ -1,0 +1,10 @@
+#include <Arduino.h>
+#include <Domain/VentController.cnx>
+
+void setup() {
+    VentController.setup();
+}
+
+void loop() {
+    VentController.loop();
+}

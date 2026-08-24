@@ -1,0 +1,11 @@
+// Tunable behaviour. Pin numbers live in the scope that owns the pin --
+// see the constructor-argument note in the plan header.
+scope AppConfig {
+    public const f32 COOL_SETPOINT_DEFAULT_C <- 18.0;
+    public const f32 HEAT_SETPOINT_DEFAULT_C <- 20.0;
+    public const f32 HYSTERESIS_C <- 1.0;
+    public const f32 SETPOINT_MINIMUM_C <- 10.0;
+    public const f32 SETPOINT_MAXIMUM_C <- 30.0;
+    public const f32 SETPOINT_STEP_C <- 0.1;
+    public const u32 SERIAL_BAUD <- 115200;
+}

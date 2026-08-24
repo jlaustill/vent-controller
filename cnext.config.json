@@ -1,0 +1,8 @@
+{
+    "cppRequired": true,
+    "target": "avr",
+    "include": ["include/", ".pio/libdeps/"],
+    "noCache": true,
+    "headerOut": "include",
+    "basePath": "src"
+}

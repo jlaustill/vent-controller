@@ -30,7 +30,7 @@ These were confirmed against cnext 0.2.18 before this plan was written. Do not r
 | Behaviour | Result |
 | --- | --- |
 | `scope Elapsed { u32 between(...) }` | → `uint32_t Elapsed_between(uint32_t base, uint32_t now)` |
-| Header output path | **Flattened** — `src/Data/Elapsed.cnx` → `include/Elapsed.hpp`, not `include/Data/`. Include as `<Elapsed.hpp>`. |
+| Header output path | **Mirrors the source tree** when built the way this project builds: `cnext src/main.cnx` follows includes, so `src/Data/Elapsed.cnx` → `include/Data/Elapsed.hpp`. Include as `<Data/Elapsed.hpp>`. (Invoking `cnext` directly on a leaf file makes that file the entry and yields a flat header — do not probe it that way, it is not how the build runs.) |
 | `.cpp` output path | Beside the source: `src/Data/Elapsed.cpp` |
 | Struct parameter, written | → `ElapsedMilliseconds&` (a C++ reference, not a pointer) |
 | Struct parameter, read-only | → `const ElapsedMilliseconds&` |
@@ -40,6 +40,8 @@ These were confirmed against cnext 0.2.18 before this plan was written. Do not r
 | Constructor arg, global const + object *inside* a scope | **Rejected** — "must be const" though it is. c-next#1187. Reproducer: `~/code/c-next2/bugs/issue-scoped-const-constructor-arg/`. |
 | Constructor arg, qualified const — `Sensor s(AppConfig.PIN)` | **Parse error.** c-next#1188. Reproducer: `~/code/c-next2/bugs/issue-qualified-const-constructor-arg/`. |
 | Ternary on a bare bool — `flag ? a : b` | **Parse error.** Write `(flag = true) ? a : b`; it generates `flag == true`. |
+| Scope member visibility (ADR-016) | Functions are public by default; **variables and consts are PRIVATE by default** and need an explicit `public`. |
+| Private member read across an `#include` | **Silently miscompiled**, not rejected: the declaration is dropped, a reference to it is emitted anyway, and cnext reports success. The same violation inside one file errors correctly. Reproducer: `~/code/c-next2/bugs/issue-cross-file-private-const-silent-miscompile/`. |
 
 **Consequence for this plan:** pin constants for a driver live in that driver's own scope, not in `AppConfig`. That is the documented working form and is defensible design — the driver owns its pin. Once c-next#1187 and c-next#1188 are fixed, pins can centralise into `AppConfig` as a mechanical change.
 
@@ -136,13 +138,16 @@ lib_deps =
 // Tunable behaviour. Pin numbers live in the scope that owns the pin --
 // see the constructor-argument note in the plan header.
 scope AppConfig {
-    const f32 COOL_SETPOINT_DEFAULT_C <- 18.0;
-    const f32 HEAT_SETPOINT_DEFAULT_C <- 20.0;
-    const f32 HYSTERESIS_C <- 1.0;
-    const f32 SETPOINT_MINIMUM_C <- 10.0;
-    const f32 SETPOINT_MAXIMUM_C <- 30.0;
-    const f32 SETPOINT_STEP_C <- 0.1;
-    const u32 SERIAL_BAUD <- 115200;
+    // `public` is REQUIRED -- ADR-016 makes scope variables and consts private
+    // by default. Without it these are silently dropped from the generated
+    // output while callers still emit references to them.
+    public const f32 COOL_SETPOINT_DEFAULT_C <- 18.0;
+    public const f32 HEAT_SETPOINT_DEFAULT_C <- 20.0;
+    public const f32 HYSTERESIS_C <- 1.0;
+    public const f32 SETPOINT_MINIMUM_C <- 10.0;
+    public const f32 SETPOINT_MAXIMUM_C <- 30.0;
+    public const f32 SETPOINT_STEP_C <- 0.1;
+    public const u32 SERIAL_BAUD <- 115200;
 }
 ```
 
@@ -231,7 +236,7 @@ Create `test/test_elapsed/test_elapsed.cpp`:
 
 ```cpp
 #include <unity.h>
-#include <Elapsed.hpp>
+#include <Data/Elapsed.hpp>
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -271,7 +276,7 @@ int main(int, char **) {
 - [ ] **Step 3: Run the test to verify it fails**
 
 Run: `pio test -e native`
-Expected: FAIL — `Elapsed.hpp: No such file or directory`.
+Expected: FAIL — `Data/Elapsed.hpp: No such file or directory`.
 
 - [ ] **Step 4: Write `src/Data/Elapsed.cnx`**
 
@@ -294,7 +299,7 @@ scope Elapsed {
 - [ ] **Step 5: Transpile**
 
 Run: `cnext src/Data/Elapsed.cnx`
-Expected: generates `src/Data/Elapsed.cpp` and `include/Elapsed.hpp`. Confirm the header declares `uint32_t Elapsed_between(uint32_t base, uint32_t now);`.
+Expected: generates `src/Data/Elapsed.cpp` and `include/Elapsed.hpp`. Confirm `include/Data/Elapsed.hpp` declares `uint32_t Elapsed_between(uint32_t base, uint32_t now);`.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -652,7 +657,7 @@ Create `test/test_vent_logic/test_vent_logic.cpp`. Setpoint 18.0 °C with 1.0 °
 
 ```cpp
 #include <unity.h>
-#include <VentLogic.hpp>
+#include <Domain/VentLogic.hpp>
 
 static const float SETPOINT = 18.0f;
 static const float BAND = 1.0f;
@@ -726,7 +731,7 @@ int main(int, char **) {
 - [ ] **Step 3: Run the test to verify it fails**
 
 Run: `pio test -e native -f test_vent_logic`
-Expected: FAIL — `VentLogic.hpp: No such file or directory`.
+Expected: FAIL — `Domain/VentLogic.hpp: No such file or directory`.
 
 - [ ] **Step 4: Write `src/Data/types/EHvacMode.cnx`**
 
@@ -1021,7 +1026,7 @@ Create `test/test_button_logic/test_button_logic.cpp`:
 
 ```cpp
 #include <unity.h>
-#include <ButtonLogic.hpp>
+#include <Display/ButtonLogic.hpp>
 
 static ButtonState state;
 
@@ -1092,7 +1097,7 @@ int main(int, char **) {
 - [ ] **Step 3: Run the test to verify it fails**
 
 Run: `pio test -e native -f test_button_logic`
-Expected: FAIL — `ButtonLogic.hpp: No such file or directory`.
+Expected: FAIL — `Display/ButtonLogic.hpp: No such file or directory`.
 
 - [ ] **Step 4: Write `src/Display/ButtonLogic.cnx`**
 
@@ -1387,6 +1392,22 @@ git commit -m "feat: CSV status logging and watchdog"
 ```
 
 ---
+
+## Status
+
+**Task 1 is complete (`7e23f77`). Execution was halted there by the user on 2026-08-24.**
+Tasks 2-9 were never dispatched. Before restarting, note two defects the pre-flight scan
+found in Task 6 as written:
+
+1. `VentLogic.cnx` includes `RoomSensor.cnx` and `VentRelay.cnx`, both of which pull in
+   `Arduino.h`, so its generated `.cpp` cannot compile in `[env:native]`. Split the pure
+   predicates into `src/Domain/VentDecision.cnx` with no includes.
+2. `VentLogic.cnx` reads `AppConfig.HYSTERESIS_C` without including `AppConfig.cnx`.
+
+And one scope question worth settling before restarting: Task 6 builds
+`shouldOpenForHeating`, `handleHeatCycle`, `EHvacMode`, and a mode branch that nothing can
+exercise, because mode cannot change until buttons arrive in Task 8. Heat mode should ship
+with the buttons that make it reachable, not before.
 
 ## After the plan
 
