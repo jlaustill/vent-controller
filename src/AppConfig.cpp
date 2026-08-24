@@ -10,10 +10,10 @@
 // Tunable behaviour. Pin numbers live in the scope that owns the pin --
 // see the constructor-argument note in the plan header.
 /* Scope: AppConfig */
-const float AppConfig_COOL_SETPOINT_DEFAULT_C = 18.0;
-const float AppConfig_HEAT_SETPOINT_DEFAULT_C = 20.0;
-const float AppConfig_HYSTERESIS_C = 1.0;
-const float AppConfig_SETPOINT_MINIMUM_C = 10.0;
-const float AppConfig_SETPOINT_MAXIMUM_C = 30.0;
-const float AppConfig_SETPOINT_STEP_C = 0.1;
-const uint32_t AppConfig_SERIAL_BAUD = 115200U;
+const float AppConfig__COOL_SETPOINT_DEFAULT_C = 18.0;
+const float AppConfig__HEAT_SETPOINT_DEFAULT_C = 20.0;
+const float AppConfig__HYSTERESIS_C = 1.0;
+const float AppConfig__SETPOINT_MINIMUM_C = 10.0;
+const float AppConfig__SETPOINT_MAXIMUM_C = 30.0;
+const float AppConfig__SETPOINT_STEP_C = 0.1;
+const uint32_t AppConfig__SERIAL_BAUD = 115200U;

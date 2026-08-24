@@ -10,10 +10,10 @@
 
 /* Scope: VentController */
 
-void VentController_setup(void) {
-    Serial.begin(AppConfig_SERIAL_BAUD);
+void VentController__setup(void) {
+    Serial.begin(AppConfig__SERIAL_BAUD);
     Serial.println("vent-controller starting");
 }
 
-void VentController_loop(void) {
+void VentController__loop(void) {
 }

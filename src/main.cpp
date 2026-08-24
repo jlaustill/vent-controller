@@ -7,9 +7,9 @@
 #include <Domain/VentController.hpp>
 
 void setup(void) {
-    VentController_setup();
+    VentController__setup();
 }
 
 void loop(void) {
-    VentController_loop();
+    VentController__loop();
 }
