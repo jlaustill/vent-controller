@@ -37,11 +37,11 @@ These were confirmed against cnext 0.2.18 before this plan was written. Do not r
 | Constructor arg, bare literal — `Sensor s(10)` | **Parse error.** Bind a const first. |
 | Constructor arg, const in the *same scope* | **Works.** This is the form this plan uses. |
 | Constructor arg, global const + object at global scope | Works. |
-| Constructor arg, global const + object *inside* a scope | **Rejected** — "must be const" though it is. Reproducer filed at `~/code/c-next2/bugs/issue-scoped-const-constructor-arg/`. |
-| Constructor arg, qualified const — `Sensor s(AppConfig.PIN)` | **Parse error.** Reproducer at `~/code/c-next2/bugs/issue-qualified-const-constructor-arg/`. |
+| Constructor arg, global const + object *inside* a scope | **Rejected** — "must be const" though it is. c-next#1187. Reproducer: `~/code/c-next2/bugs/issue-scoped-const-constructor-arg/`. |
+| Constructor arg, qualified const — `Sensor s(AppConfig.PIN)` | **Parse error.** c-next#1188. Reproducer: `~/code/c-next2/bugs/issue-qualified-const-constructor-arg/`. |
 | Ternary on a bare bool — `flag ? a : b` | **Parse error.** Write `(flag = true) ? a : b`; it generates `flag == true`. |
 
-**Consequence for this plan:** pin constants for a driver live in that driver's own scope, not in `AppConfig`. That is the documented working form and is defensible design — the driver owns its pin. Once the qualified-const defect is fixed upstream, pins can centralise into `AppConfig` as a mechanical change.
+**Consequence for this plan:** pin constants for a driver live in that driver's own scope, not in `AppConfig`. That is the documented working form and is defensible design — the driver owns its pin. Once c-next#1187 and c-next#1188 are fixed, pins can centralise into `AppConfig` as a mechanical change.
 
 ## File Structure
 
@@ -1396,4 +1396,4 @@ Left deliberately for after the device is running and observed:
 - Site the BME280 away from the register and outside the controller enclosure. Self-heating and discharge air defeat the loop regardless of firmware.
 - Decide the 24VAC source — the air handler's transformer or a separate supply. No firmware impact.
 - Confirm the Uno's 5V supply, and whether it is powered independently of the air handler. Determines whether the board brownout-resets when the blower starts.
-- Centralise pin constants into `AppConfig` once the qualified-const constructor-argument defect is fixed upstream.
+- Centralise pin constants into `AppConfig` once c-next#1187 and c-next#1188 are fixed.
