@@ -56,6 +56,7 @@ src/
 │   └── VentLogic.cnx             # cool/heat cycle handlers + pure predicates
 ├── Data/
 │   ├── Uptime.cnx                # monotonic 64-bit millisecond time base
+│   ├── Stopwatch.cnx             # ElapsedMilliseconds — resettable elapsed counters
 │   ├── RoomSensor.cnx            # Adafruit_BME280 over SPI, validity gate
 │   └── types/EHvacMode.cnx       # HVAC_COOL, HVAC_HEAT
 └── Display/
@@ -76,7 +77,8 @@ where `mode` is a scope member and resolves bare.
 
 ```c-next
 void loop() {
-    Uptime.update(millis());
+    u32 now <- millis();
+    Uptime.update(now);
     Buttons.update();
     RoomSensor.update();
     if (mode = HVAC_COOL) { VentLogic.handleCoolCycle(); }
@@ -86,41 +88,60 @@ void loop() {
 ```
 
 `Uptime.update()` takes the reading as a parameter rather than calling `millis()`
-itself. That one deviation from the no-argument pattern is what makes the epoch
-arithmetic — the trickiest code in the project — testable on the host by feeding
-it a synthetic sequence. Every other scope reads its own hardware and delegates
-the decision to a pure inner function.
+itself, and the reading is saved to a variable rather than passed inline. That
+one deviation from the no-argument pattern is what makes the epoch arithmetic —
+the trickiest code in the project — testable on the host by feeding it a
+synthetic sequence. Every other scope reads its own hardware and delegates the
+decision to a pure inner function.
 
 ## Time base
 
-`millis()` returns `u32` and wraps every 49.7 days. Rather than depend on
-observing that wrap, `Uptime` keeps its own 10-day epoch, which always rolls
-first. `epochCount` therefore counts complete 10-day periods of uptime, and no
-reading is ever subtracted across a discontinuity.
+The Teensy's `elapsedMillis` is the model — a counter read as "how long since
+this last happened" and reset by assigning zero:
+
+```cpp
+elapsedMillis sinceRead;
+if (sinceRead > 1000) { sinceRead = 0; readSensor(); }
+```
+
+Its implementation is `millis() - base`, which stays correct across the 49.7-day
+`millis()` rollover only because C's unsigned subtraction wraps. C-Next defaults
+to clamp arithmetic, so at the rollover that subtraction saturates to zero and
+every timer in the firmware stalls for 49.7 days. Declaring `wrap u32` restores
+the arithmetic but puts the rollover somewhere nothing can observe or test.
+
+So the ergonomics are kept and the foundation is replaced. `Uptime` accumulates
+elapsed steps into a monotonic 64-bit millisecond count that is exact across the
+hardware wrap. `ElapsedMilliseconds` then provides `elapsedMillis` semantics on
+top of a clock that never goes backward, where the subtraction cannot underflow.
+
+### Uptime
+
+`withinEpoch` resets every 10 days and `epochCount` counts complete 10-day
+periods of uptime.
 
 ```c-next
 scope Uptime {
     const u32 EPOCH_MILLISECONDS <- 864000000;   // 10 days
 
-    u32 epochBase <- 0;      // millis() reading when the current epoch began
-    u32 epochCount <- 0;     // completed 10-day epochs
+    u32 lastReading <- 0;    // previous millis() reading
     u32 withinEpoch <- 0;    // milliseconds elapsed inside the current epoch
+    u32 epochCount <- 0;     // completed 10-day epochs
 
     void update(u32 now) {
-        if (now < epochBase) {
-            // millis() moved backward: the hardware wrapped, or a reading was
-            // lost. Start a fresh epoch instead of subtracting across it.
-            epochBase <- now;
-            withinEpoch <- 0;
-            epochCount +<- 1;
-            return;
+        u32 delta <- 0;
+        if (now >= lastReading) {
+            delta <- now - lastReading;
+        } else {
+            // millis() wrapped: the step from lastReading up through the u32
+            // ceiling, then from zero up to now.
+            delta <- (4294967295 - lastReading) + now + 1;
         }
+        lastReading <- now;
 
-        withinEpoch <- now - epochBase;
-
-        if (withinEpoch >= EPOCH_MILLISECONDS) {
+        withinEpoch <- withinEpoch + delta;
+        while (withinEpoch >= EPOCH_MILLISECONDS) {
             withinEpoch <- withinEpoch - EPOCH_MILLISECONDS;
-            epochBase <- now - withinEpoch;
             epochCount +<- 1;
         }
     }
@@ -134,13 +155,58 @@ scope Uptime {
 }
 ```
 
-Carrying the remainder on an epoch roll — rather than zeroing `withinEpoch` —
-keeps `milliseconds()` exactly continuous across the boundary. `now - withinEpoch`
-cannot underflow, because the new `withinEpoch` is always less than `now`.
+The wrap expression cannot overflow: it runs only when `now < lastReading`, so
+`(4294967295 - lastReading) + now + 1` is at most `4294967295` exactly.
 
-Every interval in the firmware compares `u64` values from `milliseconds()`. The
-value never decreases, so C-Next's default clamp arithmetic is correct
-throughout and no `wrap` declaration is needed anywhere.
+The `while` handles a `delta` spanning more than one epoch, which a stalled loop
+could produce. `update()` must be called at least once per `millis()` period for
+the wrap to be seen at all; the main loop satisfies that by four orders of
+magnitude.
+
+### ElapsedMilliseconds
+
+```c-next
+struct ElapsedMilliseconds {
+    u64 base;
+}
+
+scope Stopwatch {
+    u64 elapsed(const ElapsedMilliseconds counter) {
+        u64 now <- Uptime.milliseconds();
+        return now - counter.base;
+    }
+
+    void reset(ElapsedMilliseconds counter) {
+        counter.base <- Uptime.milliseconds();
+    }
+}
+```
+
+Structs are data containers in C-Next, so the operations live in a scope beside
+the type rather than on it. A parameter that is written transpiles to a mutable
+pointer and a read-only struct parameter auto-consts (ADR-006), so `reset()`
+updates the caller's counter with no pointer syntax.
+
+Usage is the `elapsedMillis` pattern, with the comparison extracted to satisfy
+MISRA 13.5:
+
+```c-next
+ElapsedMilliseconds readTimer;
+
+void update() {
+    u64 sinceRead <- Stopwatch.elapsed(readTimer);
+    if (sinceRead < READ_INTERVAL_MILLISECONDS) { return; }
+    Stopwatch.reset(readTimer);
+    // ... take a reading
+}
+```
+
+Five behaviours use one: the 1 s sensor read, the 25 ms debounce, the 600 ms
+hold delay and 150 ms repeat, the 250 ms redraw, and the fault duration shown on
+the display. Each would otherwise hand-roll the same comparison.
+
+Because the clock only ever increases, C-Next's default clamp arithmetic is
+correct throughout and no `wrap` declaration appears anywhere in the project.
 
 ## Sensor
 
@@ -161,31 +227,26 @@ comparison, and a value that fails it can never reach the relay.
 
 ## Control logic
 
-The setpoint is the limit the room is not pushed past. Hysteresis is how far the
-room drifts back before the vent reopens.
+The setpoint is the middle of the band. Hysteresis is the distance from the
+setpoint to each edge, so the total band is twice the hysteresis.
 
-In cooling, with a setpoint of 18.0 °C and 1.0 °C of hysteresis: the vent closes
-when the room reaches 18.0 °C and reopens only once it has drifted up to
-19.0 °C. The room lives in the band 18.0–19.0 °C and never goes below the
-setpoint. Heating mirrors this: the vent closes at the setpoint and reopens a
-band below it, so the room never goes above.
-
-This orientation is deliberate. The complaint is over-cooling, so the setpoint
-is a floor in cooling mode, not a midpoint. Centring the band on the setpoint
-instead would let the room reach 17.5 °C.
+In cooling, with a setpoint of 18.0 °C and 1.0 °C of hysteresis: the vent opens
+when the room rises to 19.0 °C and closes when it falls to 17.0 °C. The room
+swings across 17.0–19.0 °C. Heating mirrors it: the vent opens when the room
+falls to 17.0 °C and closes when it rises to 19.0 °C.
 
 ```c-next
 bool shouldOpenForCooling(f32 temperature, f32 setpoint, f32 hysteresis,
                           bool currentlyOpen, bool readingValid) {
     if (!readingValid) { return false; }
-    if (currentlyOpen) { return temperature > setpoint; }
+    if (currentlyOpen) { return temperature > (setpoint - hysteresis); }
     return temperature > (setpoint + hysteresis);
 }
 
 bool shouldOpenForHeating(f32 temperature, f32 setpoint, f32 hysteresis,
                           bool currentlyOpen, bool readingValid) {
     if (!readingValid) { return false; }
-    if (currentlyOpen) { return temperature < setpoint; }
+    if (currentlyOpen) { return temperature < (setpoint + hysteresis); }
     return temperature < (setpoint - hysteresis);
 }
 ```
@@ -199,9 +260,9 @@ Both predicates return `false` for an invalid reading, and `false` closes the
 vent. Fail-closed is the default path rather than a special case: a dead sensor,
 a wedged bus, and a satisfied room all reach the same code.
 
-Hysteresis of 1.0 °C against a sensor resolving 0.1 °C also removes any
-possibility of boundary chatter, so the decision can run every loop without
-cycling the actuator.
+A 2.0 °C band against a sensor resolving 0.1 °C also removes any possibility of
+boundary chatter, so the decision can run every loop without cycling the
+actuator.
 
 ## Relay
 
@@ -254,7 +315,7 @@ room look identical from outside the box.
 | --- | --- |
 | Cooling setpoint | 18.0 °C |
 | Heating setpoint | 20.0 °C |
-| Hysteresis | 1.0 °C, both modes |
+| Hysteresis | 1.0 °C either side of setpoint, both modes (2.0 °C band) |
 | Setpoint range | 10.0 °C to 30.0 °C |
 | Setpoint step | 0.1 °C |
 | Mode at boot | `HVAC_COOL` |
@@ -322,15 +383,21 @@ Flash budget is roughly 4KB core and Wire, 10KB for the Adafruit BME280 stack,
 
 Unity tests running on the host:
 
-**Uptime** — the epoch rolls at exactly 864,000,000; `milliseconds()` is
-continuous across a roll; a backward `millis()` reading starts a fresh epoch and
-increments the count; the value never decreases across a long synthetic
-sequence including several rolls.
+**Uptime** — the epoch rolls at exactly 864,000,000; a `millis()` wrap yields
+the exact elapsed step rather than an invented one (4,294,967,295 followed by 0
+advances `milliseconds()` by 1); a single `delta` spanning more than one epoch
+rolls the count more than once; the value never decreases across a long
+synthetic sequence including several epoch rolls and several hardware wraps.
 
-**VentLogic, cooling** — a closed vent stays closed at the setpoint and up to
-`setpoint + hysteresis`; it opens above that; an open vent stays open down to the
-setpoint and closes at it; an invalid reading returns `false` in every
-combination of the other inputs.
+**Stopwatch** — `elapsed()` reads zero immediately after `reset()`; it tracks
+the clock as `Uptime` advances; two counters reset independently; a counter
+spanning an epoch roll and a hardware wrap still reports the true interval.
+
+**VentLogic, cooling** — a closed vent stays closed up to `setpoint +
+hysteresis` and opens above it; an open vent stays open down to `setpoint -
+hysteresis` and closes at it; the vent does not change state anywhere inside the
+band; an invalid reading returns `false` in every combination of the other
+inputs.
 
 **VentLogic, heating** — the mirror of the above, which pins the direction so a
 later change cannot silently invert it.
@@ -346,9 +413,9 @@ specified delay and interval.
    `LiquidCrystal_I2C` fork, since several incompatible ones share the name.
 3. Measure the H_Relay module's active level, then add the pull resistor for the
    pre-`setup()` window. Do this before 24VAC is connected.
-4. Verify the transpiler accepts `total[32, 32] <- epochCount` — a 32-bit-wide
-   bit write into a `u64` is documented but is not used anywhere in the existing
-   projects.
+4. Verify the transpiler accepts `u64 total <- epochCount` followed by
+   `total * EPOCH_MILLISECONDS` — widening a `u32` into `u64` and multiplying
+   by a `u32` constant, which MISRA 10.4 essential-type rules could reject.
 5. Verify `"target": "avr"` is accepted by cnext 0.2.18.
 6. Confirm the Uno's 5V supply and whether it is powered independently of the
    air handler.
